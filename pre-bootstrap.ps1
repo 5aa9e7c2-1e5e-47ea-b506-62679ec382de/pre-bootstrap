@@ -92,7 +92,7 @@ $BootstrapRoot = 'C:\bootstrap'
 $NfsDrive      = 'Z:'
 
 $RemoteWinBootstrap = 'win-bootstrap.ps1'
-$RemoteAnsibleKey   = 'ssh\ansible.pub'
+$AnsibleKey   = 'ssh\id_ansible.pub'
 
 # -------------------------
 # Preconditions
@@ -130,7 +130,10 @@ function Ensure-NfsMounted {
 
     if (-not (Get-PSDrive -Name $driveName -ErrorAction SilentlyContinue)) {
         $remote = "\\$NfsServer$NfsShare"
-        mount -o anon $remote $NfsDrive | Out-Null
+
+        # IMPORTANT:
+        # Call native mount.exe, not the PowerShell alias "mount"
+        mount.exe -o anon $remote $NfsDrive | Out-Null
     }
 }
 
@@ -138,7 +141,7 @@ function Ensure-NfsUnmounted {
     $driveName = $NfsDrive.TrimEnd(':')
 
     if (Get-PSDrive -Name $driveName -ErrorAction SilentlyContinue) {
-        umount $NfsDrive
+        umount.exe $NfsDrive
     }
 }
 
@@ -149,8 +152,8 @@ function Ensure-NfsUnmounted {
 function Ensure-BootstrapLayout {
     $paths = @(
         $BootstrapRoot,
-        Join-Path $BootstrapRoot 'ssh',
-        Join-Path $BootstrapRoot 'meta'
+        (Join-Path $BootstrapRoot 'ssh'),
+        (Join-Path $BootstrapRoot 'meta')
     )
 
     foreach ($path in $paths) {
@@ -193,8 +196,8 @@ Stage-File `
 
 # Stage SSH public key(s)
 Stage-File `
-    -Source (Join-Path $NfsDrive $RemoteAnsibleKey) `
-    -Destination (Join-Path $BootstrapRoot 'ssh\ansible.pub')
+    -Source (Join-Path $NfsDrive $AnsibleKey) `
+    -Destination (Join-Path $BootstrapRoot $AnsibleKey)
 
 # Optional execution
 if ($RunWinBootstrap) {
