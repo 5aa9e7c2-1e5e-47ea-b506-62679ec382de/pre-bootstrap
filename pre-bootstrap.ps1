@@ -44,6 +44,10 @@
     When specified, invokes win-bootstrap.ps1 after staging completes.
     Execution is explicit and never implicit.
 
+.PARAMETER Force
+    When specified, allows re-running stage-0 bootstrap even if it has already
+    completed. Existing metadata is preserved and replaced explicitly.
+
 .ASSUMPTIONS
     - Windows Server 2022
     - Script is executed with Administrator privileges
@@ -60,6 +64,12 @@
         -NfsServer nfs.example.net `
         -NfsShare /srv/bootstrap `
         -RunWinBootstrap
+
+.EXAMPLE
+    .\pre-bootstrap.ps1 `
+        -NfsServer nfs.example.net `
+        -NfsShare /srv/bootstrap `
+        -Force
 
 .NOTES
     This script is designed for controlled, side-by-side migrations where
@@ -78,7 +88,8 @@ param (
     [string]$NfsShare,
 
     [switch]$NfsPersist,
-    [switch]$RunWinBootstrap
+    [switch]$RunWinBootstrap,
+    [switch]$Force
 )
 
 Set-StrictMode -Version Latest
@@ -89,10 +100,15 @@ $ErrorActionPreference = 'Stop'
 # -------------------------
 
 $BootstrapRoot = 'C:\bootstrap'
+$MetaRoot      = Join-Path $BootstrapRoot 'meta'
 $NfsDrive      = 'Z:'
 
 $RemoteWinBootstrap = 'win-bootstrap.ps1'
-$AnsibleKey   = 'ssh\id_ansible.pub'
+$AnsibleKey         = 'ssh\id_ansible.pub'
+
+$Stage0Json      = Join-Path $MetaRoot 'stage0.json'
+$Stage0Completed = Join-Path $MetaRoot 'stage0.completed'
+$Stage0Previous  = Join-Path $MetaRoot 'stage0.previous.json'
 
 # -------------------------
 # Preconditions
@@ -109,6 +125,27 @@ function Assert-Admin {
 }
 
 Assert-Admin
+
+# -------------------------
+# Re-run protection
+# -------------------------
+
+if (Test-Path $Stage0Completed) {
+    if (-not $Force) {
+        throw @"
+Stage-0 bootstrap has already completed.
+
+Refusing to run again to prevent accidental reinitialization.
+
+If you REALLY intend to re-run stage-0, re-invoke with:
+  -Force
+"@
+    }
+
+    if (Test-Path $Stage0Json) {
+        Move-Item -Path $Stage0Json -Destination $Stage0Previous -Force
+    }
+}
 
 # -------------------------
 # NFS client feature
@@ -130,9 +167,6 @@ function Ensure-NfsMounted {
 
     if (-not (Get-PSDrive -Name $driveName -ErrorAction SilentlyContinue)) {
         $remote = "\\$NfsServer$NfsShare"
-
-        # IMPORTANT:
-        # Call native mount.exe, not the PowerShell alias "mount"
         mount.exe -o anon $remote $NfsDrive | Out-Null
     }
 }
@@ -153,7 +187,7 @@ function Ensure-BootstrapLayout {
     $paths = @(
         $BootstrapRoot,
         (Join-Path $BootstrapRoot 'ssh'),
-        (Join-Path $BootstrapRoot 'meta')
+        $MetaRoot
     )
 
     foreach ($path in $paths) {
@@ -199,12 +233,59 @@ Stage-File `
     -Source (Join-Path $NfsDrive $AnsibleKey) `
     -Destination (Join-Path $BootstrapRoot $AnsibleKey)
 
+# -------------------------
+# Write metadata (stage-0 contract)
+# -------------------------
+
+$metadata = @{
+    schema_version = 1
+    stage          = 'pre-bootstrap'
+
+    invocation = @{
+        timestamp_utc = (Get-Date).ToUniversalTime().ToString('o')
+        hostname      = $env:COMPUTERNAME
+        user          = $env:USERNAME
+        pid           = $PID
+    }
+
+    source = @{
+        nfs_server    = $NfsServer
+        nfs_share     = $NfsShare
+        mounted_drive = $NfsDrive
+    }
+
+    artifacts = @{
+        win_bootstrap = (Join-Path $BootstrapRoot 'win-bootstrap.ps1')
+        ssh_keys      = @(
+            (Join-Path $BootstrapRoot $AnsibleKey)
+        )
+    }
+
+    intent = @{
+        run_win_bootstrap = [bool]$RunWinBootstrap
+        nfs_persist       = [bool]$NfsPersist
+        force             = [bool]$Force
+    }
+}
+
+$metadata |
+    ConvertTo-Json -Depth 4 |
+    Set-Content -Path $Stage0Json -Encoding UTF8
+
+New-Item -ItemType File -Path $Stage0Completed -Force | Out-Null
+
+# -------------------------
 # Optional execution
+# -------------------------
+
 if ($RunWinBootstrap) {
     & (Join-Path $BootstrapRoot 'win-bootstrap.ps1')
 }
 
-# Teardown unless persistence explicitly requested
+# -------------------------
+# Teardown
+# -------------------------
+
 if (-not $NfsPersist) {
     Ensure-NfsUnmounted
 }
